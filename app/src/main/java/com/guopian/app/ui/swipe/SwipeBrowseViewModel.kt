@@ -6,12 +6,16 @@ import android.view.SurfaceView
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.guopian.app.core.util.VideoExtensions
+import com.guopian.app.data.prefs.PlayerPrefer
 import com.guopian.app.data.prefs.SettingsRepository
 import com.guopian.app.data.db.FolderPresetDao
 import com.guopian.app.data.db.FolderPresetEntity
 import com.guopian.app.data.db.PlaybackProgressDao
 import com.guopian.app.data.db.PlaybackProgressEntity
 import com.guopian.app.data.db.VideoEntity
+import com.guopian.app.data.repo.RootBrowseStateStore
+import com.guopian.app.data.repo.RootFolderRepository
 import com.guopian.app.data.repo.VideoRepository
 import com.guopian.app.domain.model.ConflictPolicy
 import com.guopian.app.domain.model.MarkStatus
@@ -49,6 +53,11 @@ data class SwipeUiState(
     val ready: Boolean = false,
     val currentIndex: Int = 0,
     val total: Int = 0,
+    val pageIndex: Int = 0,
+    val pageCount: Int = 0,
+    val totalInLibrary: Int = 0,
+    /** 换页时递增，强制重建 Pager。 */
+    val playlistEpoch: Int = 0,
     val video: VideoEntity? = null,
     val isPlaying: Boolean = true,
     val uiVisible: Boolean = true,
@@ -71,6 +80,9 @@ data class SwipeUiState(
     /** 当前片源显示宽高（已考虑旋转），用于 Surface 等比适配。 */
     val videoWidth: Int = 0,
     val videoHeight: Int = 0,
+    /** 收藏/取消特效：epoch 递增触发一次动画；kept=是否变为收藏。 */
+    val keepBurstEpoch: Int = 0,
+    val keepBurstKept: Boolean = false,
 )
 
 @HiltViewModel
@@ -87,6 +99,8 @@ class SwipeBrowseViewModel @Inject constructor(
     private val folderPresetDao: FolderPresetDao,
     private val settingsRepository: SettingsRepository,
     private val playbackProgressDao: PlaybackProgressDao,
+    private val rootFolderRepository: RootFolderRepository,
+    private val browseStateStore: RootBrowseStateStore,
 ) : ViewModel() {
 
     private val startIndexArg: Int = savedStateHandle["startIndex"] ?: 0
@@ -125,7 +139,15 @@ class SwipeBrowseViewModel @Inject constructor(
         } else {
             val index = startIndexArg.coerceIn(0, snap.ids.lastIndex)
             _uiState.update {
-                it.copy(ready = true, currentIndex = index, total = snap.ids.size)
+                it.copy(
+                    ready = true,
+                    currentIndex = index,
+                    total = snap.ids.size,
+                    pageIndex = snap.pageIndex,
+                    pageCount = snap.pageCount,
+                    totalInLibrary = snap.totalCount,
+                    playlistEpoch = 1,
+                )
             }
             onPageSettled(index)
         }
@@ -175,17 +197,34 @@ class SwipeBrowseViewModel @Inject constructor(
             }.awaitAll()
 
             val resumeAt = resumePositionFor(snap.ids[index])
-            keep.forEach { i ->
+            val playerPrefer = settingsRepository.playerPrefer.first()
+            // 先绑定当前页（VLC 全局仅一份），再预载邻页 Exo
+            val ordered = keep.sortedBy { if (it == index) 0 else 1 }
+            ordered.forEach { i ->
                 val id = snap.ids[i]
                 val entity = videoRepository.getById(id) ?: return@forEach
                 val media = entity.toMediaRef()
                 val startMs = if (i == index) resumeAt else 0L
-                val engine = if (i == index && failoverTracker.shouldSkipExo(id)) {
-                    playerPool.failoverToVlc(i, media, surfaces[i], startMs)
-                } else {
-                    playerPool.acquireExo(i, pivotIndex = index).also {
-                        surfaces[i]?.let { s -> it.attachSurface(s) }
-                        it.load(media, startMs)
+                val soft = shouldUseVlc(entity, id, playerPrefer)
+                val engine = when {
+                    soft && i == index ->
+                        playerPool.failoverToVlc(i, media, surfaces[i], startMs)
+                    soft && i != index -> {
+                        // 邻页兼容格式不预载，避免冲掉当前 VLC / 触发 Exo 闪退
+                        return@forEach
+                    }
+                    else -> runCatching {
+                        playerPool.acquireExo(i, pivotIndex = index).also {
+                            surfaces[i]?.let { s -> it.attachSurface(s) }
+                            it.load(media, startMs)
+                        }
+                    }.getOrElse {
+                        if (i == index) {
+                            failoverTracker.markExoFailed(id)
+                            playerPool.failoverToVlc(i, media, surfaces[i], startMs)
+                        } else {
+                            return@forEach
+                        }
                     }
                 }
                 if (i == index) {
@@ -209,6 +248,9 @@ class SwipeBrowseViewModel @Inject constructor(
                 it.copy(
                     currentIndex = index,
                     total = snap.ids.size,
+                    pageIndex = snap.pageIndex,
+                    pageCount = snap.pageCount,
+                    totalInLibrary = snap.totalCount,
                     video = video,
                     markStatus = video?.let { v -> markVideoUseCase.statusOf(v) } ?: MarkStatus.TO_DELETE,
                     isPlaying = true,
@@ -223,8 +265,29 @@ class SwipeBrowseViewModel @Inject constructor(
                     videoHeight = dispH,
                 )
             }
+            video?.let { persistBrowseCursor(it) }
             bindEvents(index)
             startPositionTicker(index)
+        }
+    }
+
+    private fun shouldUseVlc(
+        entity: VideoEntity,
+        videoId: Long,
+        prefer: PlayerPrefer,
+    ): Boolean {
+        if (prefer == PlayerPrefer.VLC_FIRST) return true
+        // AVI 等格式 Exo 可能原生闪退，必须直接走 VLC
+        if (VideoExtensions.preferVlc(entity.ext)) return true
+        if (failoverTracker.shouldSkipExo(videoId)) return true
+        return false
+    }
+
+    private fun persistBrowseCursor(video: VideoEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = rootFolderRepository.getCurrent() ?: return@launch
+            val treeUri = Uri.parse(root.treeUri)
+            browseStateStore.updateLast(treeUri, video.relativePath)
         }
     }
 
@@ -546,14 +609,61 @@ class SwipeBrowseViewModel @Inject constructor(
 
     fun goPrevious() {
         val idx = _uiState.value.currentIndex
-        if (idx <= 0) return
-        _uiState.update { it.copy(pendingScrollIndex = idx - 1, uiVisible = true) }
+        if (idx > 0) {
+            _uiState.update { it.copy(pendingScrollIndex = idx - 1, uiVisible = true) }
+            return
+        }
+        val snap = playlistSession.current() ?: return
+        if (!snap.hasPrevPage) return
+        viewModelScope.launch {
+            val result = playlistSession.openPage(snap.pageIndex - 1) ?: return@launch
+            playerPool.releaseAll()
+            failoverTracker.clear()
+            val last = (result.snapshot.ids.size - 1).coerceAtLeast(0)
+            _uiState.update {
+                it.copy(
+                    ready = true,
+                    currentIndex = last,
+                    total = result.snapshot.ids.size,
+                    pageIndex = result.snapshot.pageIndex,
+                    pageCount = result.snapshot.pageCount,
+                    totalInLibrary = result.snapshot.totalCount,
+                    playlistEpoch = it.playlistEpoch + 1,
+                    pendingScrollIndex = last,
+                    uiVisible = true,
+                )
+            }
+            onPageSettled(last)
+        }
     }
 
     fun goNext() {
         val idx = _uiState.value.currentIndex
-        if (idx + 1 >= _uiState.value.total) return
-        _uiState.update { it.copy(pendingScrollIndex = idx + 1, uiVisible = true) }
+        if (idx + 1 < _uiState.value.total) {
+            _uiState.update { it.copy(pendingScrollIndex = idx + 1, uiVisible = true) }
+            return
+        }
+        val snap = playlistSession.current() ?: return
+        if (!snap.hasNextPage) return
+        viewModelScope.launch {
+            val result = playlistSession.openPage(snap.pageIndex + 1) ?: return@launch
+            playerPool.releaseAll()
+            failoverTracker.clear()
+            _uiState.update {
+                it.copy(
+                    ready = true,
+                    currentIndex = 0,
+                    total = result.snapshot.ids.size,
+                    pageIndex = result.snapshot.pageIndex,
+                    pageCount = result.snapshot.pageCount,
+                    totalInLibrary = result.snapshot.totalCount,
+                    playlistEpoch = it.playlistEpoch + 1,
+                    pendingScrollIndex = 0,
+                    uiVisible = true,
+                )
+            }
+            onPageSettled(0)
+        }
     }
 
     fun cycleSpeed() {
@@ -596,6 +706,16 @@ class SwipeBrowseViewModel @Inject constructor(
     fun toggleKeep() {
         val current = _uiState.value.markStatus
         val next = if (current == MarkStatus.KEEP) MarkStatus.TO_DELETE else MarkStatus.KEEP
+        // 先发特效，再落库；双击也能立刻看到反馈
+        _uiState.update {
+            it.copy(
+                keepBurstEpoch = it.keepBurstEpoch + 1,
+                keepBurstKept = next == MarkStatus.KEEP,
+                markStatus = next,
+                uiVisible = true,
+                controlsEpoch = it.controlsEpoch + 1,
+            )
+        }
         setStatus(next, advanceIfEnabled = next == MarkStatus.KEEP)
     }
 
@@ -619,22 +739,37 @@ class SwipeBrowseViewModel @Inject constructor(
             } else {
                 markVideoUseCase.setStar(listOf(video.id), 0)
             }
+            val root = rootFolderRepository.getCurrent()
+            if (root != null) {
+                withContext(Dispatchers.IO) {
+                    browseStateStore.upsertMark(
+                        Uri.parse(root.treeUri),
+                        video.relativePath,
+                        status,
+                    )
+                }
+            }
             val updated = videoRepository.getById(video.id)
             var pendingScroll: Int? = null
+            var jumpNextPage = false
             if (advanceIfEnabled) {
                 val autoNext = settingsRepository.markAutoNext.first()
                 val idx = _uiState.value.currentIndex
-                if (autoNext && idx + 1 < _uiState.value.total) {
-                    pendingScroll = idx + 1
+                if (autoNext) {
+                    when {
+                        idx + 1 < _uiState.value.total -> pendingScroll = idx + 1
+                        playlistSession.current()?.hasNextPage == true -> jumpNextPage = true
+                    }
                 }
             }
             _uiState.update {
                 it.copy(
                     video = updated,
                     markStatus = status,
-                    pendingScrollIndex = pendingScroll,
+                    pendingScrollIndex = pendingScroll ?: it.pendingScrollIndex,
                 )
             }
+            if (jumpNextPage) goNext()
         }
     }
 

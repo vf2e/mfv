@@ -13,8 +13,8 @@ import com.guopian.app.core.util.VideoExtensions
 import com.guopian.app.data.db.RootFolderDao
 import com.guopian.app.data.db.VideoDao
 import com.guopian.app.data.db.VideoEntity
-import com.guopian.app.media.thumb.VideoAspectProbe
-import com.guopian.app.media.thumb.VideoProbeMeta
+import com.guopian.app.data.repo.RootBrowseStateStore
+import com.guopian.app.domain.model.MarkStatus
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import timber.log.Timber
@@ -25,6 +25,7 @@ class ScanWorker @AssistedInject constructor(
     @Assisted params: WorkerParameters,
     private val rootFolderDao: RootFolderDao,
     private val videoDao: VideoDao,
+    private val browseStateStore: RootBrowseStateStore,
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
@@ -34,6 +35,17 @@ class ScanWorker @AssistedInject constructor(
         val now = System.currentTimeMillis()
 
         try {
+            // 重扫前先记下收藏/待定，避免 delete+insert 丢标记
+            val dbMarks = videoDao.listMarkedPaths(root.id)
+                .associate { it.relativePath to (it.markStatus to it.star) }
+            val fileState = browseStateStore.read(treeUri)
+            val mergedMarks = LinkedHashMap<String, Pair<String, Int>>()
+            fileState.marks.forEach { (path, status) ->
+                mergedMarks[path] = status.name to if (status == MarkStatus.KEEP) 1 else 0
+            }
+            // DB 优先（内存态更新于文件）
+            dbMarks.forEach { (path, mark) -> mergedMarks[path] = mark }
+
             if (StorageAccessHelper.isFileRootUri(treeUri)) {
                 val path = treeUri.path
                 val dir = if (path.isNullOrBlank()) null else java.io.File(path)
@@ -91,17 +103,49 @@ class ScanWorker @AssistedInject constructor(
             if (unique.size != found.size) {
                 Timber.w("Scan deduped %d → %d entries", found.size, unique.size)
             }
-            unique.chunked(50).forEach { chunk ->
+            // 写入时带上已保存的收藏状态；扫描阶段不做 MediaMetadata 探测（量大易 OOM/闪退）
+            val withMarks = unique.map { entity ->
+                val mark = mergedMarks[entity.relativePath]
+                if (mark == null) {
+                    entity
+                } else {
+                    entity.copy(markStatus = mark.first, star = mark.second)
+                }
+            }
+            withMarks.chunked(80).forEach { chunk ->
                 videoDao.upsertAll(chunk)
                 if (isStopped) return Result.failure()
             }
             val stored = videoDao.countVisibleByRoot(root.id)
+
+            // 把当前收藏写回目录 txt，方便下次/换机恢复
+            val keepMarks = withMarks
+                .filter { it.markStatus == MarkStatus.KEEP.name || it.markStatus == MarkStatus.PENDING.name }
+                .associate {
+                    it.relativePath to runCatching { MarkStatus.valueOf(it.markStatus) }
+                        .getOrDefault(MarkStatus.TO_DELETE)
+                }
+            browseStateStore.write(
+                treeUri,
+                RootBrowseStateStore.BrowseState(
+                    lastRelativePath = fileState.lastRelativePath,
+                    marks = keepMarks,
+                ),
+            )
+
             rootFolderDao.updateScanStats(
                 id = root.id,
                 lastScannedAt = now,
                 videoCount = stored,
             )
-            Timber.i("Scan finished: found=%d unique=%d stored=%d from %s", found.size, unique.size, stored, treeUri)
+            Timber.i(
+                "Scan finished: found=%d unique=%d stored=%d marks=%d from %s",
+                found.size,
+                unique.size,
+                stored,
+                keepMarks.size,
+                treeUri,
+            )
             val folderHint = when {
                 StorageAccessHelper.isFileRootUri(treeUri) ->
                     treeUri.path?.let { StorageAccessHelper.displayPathForFile(java.io.File(it)) }.orEmpty()
@@ -143,6 +187,7 @@ class ScanWorker @AssistedInject constructor(
             if (isStopped) return
             val name = child.name ?: continue
             if (name.startsWith(".")) continue
+            if (name.equals(RootBrowseStateStore.FILE_NAME, ignoreCase = true)) continue
             val childRelative = if (parentRelative.isEmpty()) name else "$parentRelative/$name"
             when {
                 child.isDirectory -> {
@@ -157,7 +202,6 @@ class ScanWorker @AssistedInject constructor(
                 }
                 VideoExtensions.isVideoFileName(name) -> {
                     val uri = Uri.fromFile(child)
-                    val meta = probeMeta(uri)
                     out += VideoEntity(
                         rootId = rootId,
                         docUri = uri.toString(),
@@ -171,10 +215,6 @@ class ScanWorker @AssistedInject constructor(
                         sizeBytes = child.length(),
                         dateModified = child.lastModified(),
                         lastScannedAt = now,
-                        durationMs = meta.durationMs,
-                        width = meta.width,
-                        height = meta.height,
-                        rotation = meta.rotation,
                     )
                     setProgressAsync(workDataOf(KEY_FOUND to out.size))
                 }
@@ -202,6 +242,7 @@ class ScanWorker @AssistedInject constructor(
             if (isStopped) return
             val name = child.name ?: continue
             if (name.startsWith(".")) continue
+            if (name.equals(RootBrowseStateStore.FILE_NAME, ignoreCase = true)) continue
             val childRelative = if (parentRelative.isEmpty()) name else "$parentRelative/$name"
             // Do NOT use DocumentFile.isFile — when MIME is null, isFile() is false and videos are skipped.
             val isDir = child.isDirectory
@@ -218,7 +259,6 @@ class ScanWorker @AssistedInject constructor(
                     )
                 }
                 isVideo(name, child.type) -> {
-                    val meta = probeMeta(child.uri)
                     out += VideoEntity(
                         rootId = rootId,
                         docUri = child.uri.toString(),
@@ -234,10 +274,6 @@ class ScanWorker @AssistedInject constructor(
                         sizeBytes = child.length(),
                         dateModified = child.lastModified(),
                         lastScannedAt = now,
-                        durationMs = meta.durationMs,
-                        width = meta.width,
-                        height = meta.height,
-                        rotation = meta.rotation,
                     )
                     setProgressAsync(workDataOf(KEY_FOUND to out.size))
                 }
@@ -286,6 +322,7 @@ class ScanWorker @AssistedInject constructor(
                 val docId = c.getString(idIdx) ?: continue
                 val name = c.getString(nameIdx) ?: continue
                 if (name.startsWith(".")) continue
+                if (name.equals(RootBrowseStateStore.FILE_NAME, ignoreCase = true)) continue
                 val mime = if (mimeIdx >= 0) c.getString(mimeIdx) else null
                 val size = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) c.getLong(sizeIdx) else 0L
                 val modified = if (modIdx >= 0 && !c.isNull(modIdx)) c.getLong(modIdx) else 0L
@@ -297,7 +334,6 @@ class ScanWorker @AssistedInject constructor(
                     traverseWithDocId(treeUri, docId, childRelative, depth + 1, rootId, now, out)
                 } else if (isVideo(name, mime)) {
                     val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    val meta = probeMeta(docUri)
                     out += VideoEntity(
                         rootId = rootId,
                         docUri = docUri.toString(),
@@ -311,10 +347,6 @@ class ScanWorker @AssistedInject constructor(
                         sizeBytes = size,
                         dateModified = modified,
                         lastScannedAt = now,
-                        durationMs = meta.durationMs,
-                        width = meta.width,
-                        height = meta.height,
-                        rotation = meta.rotation,
                     )
                     setProgressAsync(workDataOf(KEY_FOUND to out.size))
                 }
@@ -326,11 +358,6 @@ class ScanWorker @AssistedInject constructor(
         if (mime?.startsWith("video/") == true) return true
         if (mime == DocumentsContract.Document.MIME_TYPE_DIR) return false
         return VideoExtensions.isVideoFileName(name)
-    }
-
-    private fun probeMeta(uri: Uri): VideoProbeMeta {
-        return VideoAspectProbe.probe(applicationContext, uri)
-            ?: VideoProbeMeta(width = 0, height = 0, rotation = 0, durationMs = -1L)
     }
 
     companion object {

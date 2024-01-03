@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,10 +82,6 @@ fun SwipeBrowseScreen(
     val presets by viewModel.folderPresets.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val total = uiState.total.coerceAtLeast(1)
-    val pagerState = rememberPagerState(
-        initialPage = uiState.currentIndex.coerceIn(0, (total - 1).coerceAtLeast(0)),
-        pageCount = { uiState.total.coerceAtLeast(1) },
-    )
     val activity = LocalContext.current as? Activity
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -195,24 +192,6 @@ fun SwipeBrowseScreen(
         viewModel.clearCutMessage()
     }
 
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }
-            .distinctUntilChanged()
-            .collect { page -> viewModel.onPageSettled(page) }
-    }
-
-    LaunchedEffect(uiState.ready, uiState.currentIndex) {
-        if (uiState.ready && pagerState.currentPage != uiState.currentIndex) {
-            pagerState.scrollToPage(uiState.currentIndex)
-        }
-    }
-
-    LaunchedEffect(uiState.pendingScrollIndex) {
-        val target = uiState.pendingScrollIndex ?: return@LaunchedEffect
-        pagerState.animateScrollToPage(target)
-        viewModel.consumePendingScroll()
-    }
-
     if (uiState.showCutSheet) {
         CutTargetSheet(
             count = 1,
@@ -245,26 +224,42 @@ fun SwipeBrowseScreen(
                 }
             }
         } else {
-            VerticalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize(),
-                beyondViewportPageCount = 1,
-                key = { page -> page },
-            ) { page ->
-                val aspects by viewModel.aspectByVideoId.collectAsStateWithLifecycle()
-                val videoId = viewModel.idAt(page)
-                val size = videoId?.let { aspects[it] }
-                VideoPage(
-                    page = page,
-                    isCurrent = page == pagerState.settledPage,
-                    videoWidth = size?.first ?: 0,
-                    videoHeight = size?.second ?: 0,
-                    viewModel = viewModel,
-                    onTap = { viewModel.toggleUi() },
-                    onDoubleTap = viewModel::doubleTapKeep,
-                    onLongPress = { viewModel.speedBoost(true) },
-                    onLongPressRelease = { viewModel.speedBoost(false) },
+            key(uiState.playlistEpoch) {
+                val epochPager = rememberPagerState(
+                    initialPage = uiState.currentIndex.coerceIn(0, (total - 1).coerceAtLeast(0)),
+                    pageCount = { uiState.total.coerceAtLeast(1) },
                 )
+                LaunchedEffect(epochPager) {
+                    snapshotFlow { epochPager.settledPage }
+                        .distinctUntilChanged()
+                        .collect { page -> viewModel.onPageSettled(page) }
+                }
+                LaunchedEffect(uiState.pendingScrollIndex, uiState.playlistEpoch) {
+                    val target = uiState.pendingScrollIndex ?: return@LaunchedEffect
+                    epochPager.scrollToPage(target.coerceIn(0, (uiState.total - 1).coerceAtLeast(0)))
+                    viewModel.consumePendingScroll()
+                }
+                VerticalPager(
+                    state = epochPager,
+                    modifier = Modifier.fillMaxSize(),
+                    beyondViewportPageCount = 1,
+                    key = { page -> "${uiState.playlistEpoch}-$page" },
+                ) { page ->
+                    val aspects by viewModel.aspectByVideoId.collectAsStateWithLifecycle()
+                    val videoId = viewModel.idAt(page)
+                    val size = videoId?.let { aspects[it] }
+                    VideoPage(
+                        page = page,
+                        isCurrent = page == epochPager.settledPage,
+                        videoWidth = size?.first ?: 0,
+                        videoHeight = size?.second ?: 0,
+                        viewModel = viewModel,
+                        onTap = { viewModel.toggleUi() },
+                        onDoubleTap = viewModel::doubleTapKeep,
+                        onLongPress = { viewModel.speedBoost(true) },
+                        onLongPressRelease = { viewModel.speedBoost(false) },
+                    )
+                }
             }
 
             if (uiState.buffering) {
@@ -287,6 +282,13 @@ fun SwipeBrowseScreen(
                     },
                 )
             }
+
+            // 双击/点收藏：中心心形特效（不依赖控件栏是否显示）
+            KeepBurstOverlay(
+                epoch = uiState.keepBurstEpoch,
+                kept = uiState.keepBurstKept,
+                modifier = Modifier.align(Alignment.Center),
+            )
 
             // 左音量 / 右亮度收窄到两侧，中间大半留给上下过片
             Box(
@@ -383,7 +385,17 @@ fun SwipeBrowseScreen(
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.safeDrawing),
-                    indexLabel = "${uiState.currentIndex + 1} / ${uiState.total}",
+                    indexLabel = if (uiState.pageCount > 1) {
+                        stringResource(
+                            R.string.swipe_page_indicator,
+                            uiState.pageIndex + 1,
+                            uiState.pageCount,
+                            uiState.total,
+                            uiState.totalInLibrary,
+                        )
+                    } else {
+                        "${uiState.currentIndex + 1} / ${uiState.total}"
+                    },
                     isLandscape = isLandscape,
                     onBack = onBack,
                     onToggleOrientation = {
@@ -405,6 +417,7 @@ fun SwipeBrowseScreen(
                             bottom = if (isLandscape) 64.dp else 120.dp,
                         ),
                     markStatus = uiState.markStatus,
+                    keepBurstEpoch = uiState.keepBurstEpoch,
                     onToggleKeep = viewModel::toggleKeep,
                     onTogglePending = viewModel::togglePending,
                 )
@@ -439,8 +452,9 @@ fun SwipeBrowseScreen(
                     },
                     onPrevious = viewModel::goPrevious,
                     onNext = viewModel::goNext,
-                    canGoPrevious = uiState.currentIndex > 0,
-                    canGoNext = uiState.currentIndex + 1 < uiState.total,
+                    canGoPrevious = uiState.currentIndex > 0 || uiState.pageIndex > 0,
+                    canGoNext = uiState.currentIndex + 1 < uiState.total ||
+                        uiState.pageIndex + 1 < uiState.pageCount,
                     onCycleSpeed = viewModel::cycleSpeed,
                 )
             }

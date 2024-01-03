@@ -208,6 +208,22 @@ fun SettingsScreen(
                         ),
                     )
                 }
+                GuopianHairline()
+                FieldBlock(
+                    title = stringResource(R.string.settings_page_size),
+                    subtitle = stringResource(R.string.settings_page_size_hint),
+                ) {
+                    GuopianSegmentedRail(
+                        options = listOf(
+                            50 to "50",
+                            100 to "100",
+                            200 to "200",
+                            500 to "500",
+                        ),
+                        selected = ui.pageSize,
+                        onSelect = viewModel::setPageSize,
+                    )
+                }
             }
         }
 

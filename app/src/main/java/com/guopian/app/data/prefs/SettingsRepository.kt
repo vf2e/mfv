@@ -26,6 +26,7 @@ class SettingsRepository @Inject constructor(
 ) {
     private object Keys {
         val preloadCount = intPreferencesKey("preload_count")
+        val pageSize = intPreferencesKey("browse_page_size")
         val doubleTapAction = stringPreferencesKey("double_tap_action")
         val swapSwipe = booleanPreferencesKey("swap_swipe")
         val endBehavior = stringPreferencesKey("end_behavior")
@@ -37,6 +38,11 @@ class SettingsRepository @Inject constructor(
 
     val preloadCount: Flow<Int> = context.settingsDataStore.data.map {
         it[Keys.preloadCount] ?: 1
+    }
+
+    /** 过片/列表分页大小，默认 100。 */
+    val pageSize: Flow<Int> = context.settingsDataStore.data.map {
+        (it[Keys.pageSize] ?: 100).coerceIn(20, 500)
     }
 
     val markAutoNext: Flow<Boolean> = context.settingsDataStore.data.map {
@@ -77,6 +83,10 @@ class SettingsRepository @Inject constructor(
 
     suspend fun setPreloadCount(count: Int) {
         context.settingsDataStore.edit { it[Keys.preloadCount] = count.coerceIn(1, 3) }
+    }
+
+    suspend fun setPageSize(size: Int) {
+        context.settingsDataStore.edit { it[Keys.pageSize] = size.coerceIn(20, 500) }
     }
 
     suspend fun setMarkAutoNext(enabled: Boolean) {

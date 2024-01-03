@@ -3,6 +3,7 @@ package com.guopian.app.data.repo
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import com.guopian.app.data.db.MarkedPathRow
 import com.guopian.app.data.db.VideoDao
 import com.guopian.app.data.db.VideoEntity
 import com.guopian.app.data.db.VideoQueryBuilder
@@ -33,12 +34,15 @@ class VideoRepository @Inject constructor(
         filter: FilterSpec = FilterSpec(),
         sort: SortSpec = SortSpec(),
         randomSeed: Long = System.currentTimeMillis(),
+        pageSize: Int = 100,
     ): Flow<PagingData<VideoEntity>> {
+        val size = pageSize.coerceIn(20, 500)
         return Pager(
             config = PagingConfig(
-                pageSize = 40,
+                pageSize = size,
                 enablePlaceholders = false,
-                prefetchDistance = 20,
+                prefetchDistance = (size / 2).coerceAtLeast(10),
+                maxSize = (size * 5).coerceAtLeast(200),
             ),
             pagingSourceFactory = {
                 videoDao.pagingByQuery(
@@ -53,9 +57,11 @@ class VideoRepository @Inject constructor(
         filter: FilterSpec,
         sort: SortSpec,
         randomSeed: Long,
+        limit: Int? = null,
+        offset: Int = 0,
     ): List<Long> {
         return videoDao.queryIds(
-            VideoQueryBuilder.buildIdsQuery(rootId, filter, sort, randomSeed),
+            VideoQueryBuilder.buildIdsQuery(rootId, filter, sort, randomSeed, limit, offset),
         )
     }
 
@@ -66,6 +72,21 @@ class VideoRepository @Inject constructor(
     suspend fun getById(id: Long): VideoEntity? = videoDao.getById(id)
 
     fun observeById(id: Long): Flow<VideoEntity?> = videoDao.observeById(id)
+
+    suspend fun findIdByRelativePath(rootId: Long, relativePath: String): Long? =
+        videoDao.findIdByRelativePath(rootId, relativePath)
+
+    suspend fun listMarkedPaths(rootId: Long): List<MarkedPathRow> =
+        videoDao.listMarkedPaths(rootId)
+
+    suspend fun updateMarkByRelativePath(
+        rootId: Long,
+        relativePath: String,
+        status: MarkStatus,
+        star: Int = if (status == MarkStatus.KEEP) 1 else 0,
+    ) {
+        videoDao.updateMarkByRelativePath(rootId, relativePath, status.name, star)
+    }
 
     suspend fun saveDisplaySizeIfEmpty(id: Long, width: Int, height: Int, rotation: Int) {
         if (width <= 0 || height <= 0) return

@@ -22,3 +22,9 @@ data class TagWithCount(
     val createdAt: Long,
     val videoCount: Int,
 )
+
+data class MarkedPathRow(
+    val relativePath: String,
+    val markStatus: String,
+    val star: Int,
+)

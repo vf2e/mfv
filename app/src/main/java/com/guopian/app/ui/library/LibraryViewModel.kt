@@ -1,5 +1,6 @@
 package com.guopian.app.ui.library
 
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,8 @@ import androidx.paging.cachedIn
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.guopian.app.data.db.VideoEntity
+import com.guopian.app.data.prefs.SettingsRepository
+import com.guopian.app.data.repo.RootBrowseStateStore
 import com.guopian.app.data.repo.RootFolderRepository
 import com.guopian.app.data.repo.VideoRepository
 import com.guopian.app.data.db.FolderPresetDao
@@ -24,13 +27,13 @@ import com.guopian.app.work.ScanScheduler
 import com.guopian.app.work.ScanWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import android.content.Context
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -72,6 +75,8 @@ data class LibraryUiState(
     val cutMessage: String? = null,
     val scanError: String? = null,
     val scanResultMessage: String? = null,
+    val lastRelativePath: String? = null,
+    val pageSize: Int = 100,
 )
 
 @HiltViewModel
@@ -86,6 +91,8 @@ class LibraryViewModel @Inject constructor(
     private val folderPresetDao: FolderPresetDao,
     private val filterBridge: LibraryFilterBridge,
     private val tagDao: com.guopian.app.data.db.TagDao,
+    private val settingsRepository: SettingsRepository,
+    private val browseStateStore: RootBrowseStateStore,
 ) : ViewModel() {
 
     private val rootFlow = rootFolderRepository.observeCurrent()
@@ -110,11 +117,18 @@ class LibraryViewModel @Inject constructor(
         .map { infos -> infos.firstOrNull() }
 
     private val randomSeed = System.currentTimeMillis()
+    private val lastRelativePath = MutableStateFlow<String?>(null)
+    private val pageSizeFlow = settingsRepository.pageSize
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 100)
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val videos: Flow<PagingData<VideoEntity>> = combine(rootFlow, filterState) { root, ui ->
-        root to ui
-    }.flatMapLatest { (root, ui) ->
+    val videos: Flow<PagingData<VideoEntity>> = combine(
+        rootFlow,
+        filterState,
+        pageSizeFlow,
+    ) { root, ui, pageSize ->
+        Triple(root, ui, pageSize)
+    }.flatMapLatest { (root, ui, pageSize) ->
         if (root == null) {
             flowOf(PagingData.empty())
         } else {
@@ -123,6 +137,7 @@ class LibraryViewModel @Inject constructor(
                 filter = ui.toFilterSpec(),
                 sort = ui.sort,
                 randomSeed = randomSeed,
+                pageSize = pageSize,
             )
         }
     }.cachedIn(viewModelScope)
@@ -132,6 +147,15 @@ class LibraryViewModel @Inject constructor(
     private var lastHandledScanId: UUID? = null
 
     init {
+        viewModelScope.launch {
+            rootFlow.collect { root ->
+                if (root == null) {
+                    lastRelativePath.value = null
+                } else {
+                    lastRelativePath.value = browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+                }
+            }
+        }
         viewModelScope.launch {
             combine(rootFlow, filterState) { root, ui -> root to ui }.collect { (root, ui) ->
                 if (root == null) {
@@ -238,12 +262,14 @@ class LibraryViewModel @Inject constructor(
     }
 
     val uiState: StateFlow<LibraryUiState> = combine(
-        rootFlow,
-        filteredCount,
-        scanInfoFlow,
-        filterState,
-        scanResultMessage,
-    ) { root, count, work, filter, scanMsg ->
+        combine(rootFlow, filteredCount, scanInfoFlow) { root, count, work ->
+            Triple(root, count, work)
+        },
+        combine(filterState, scanResultMessage, lastRelativePath, pageSizeFlow) { filter, scanMsg, last, pageSize ->
+            LibraryExtras(filter, scanMsg, last, pageSize)
+        },
+    ) { rootCountWork, extras ->
+        val (root, count, work) = rootCountWork
         val running = work?.state == WorkInfo.State.RUNNING || work?.state == WorkInfo.State.ENQUEUED
         val found = work?.progress?.getInt(ScanWorker.KEY_FOUND, 0) ?: 0
         val scanError = if (work?.state == WorkInfo.State.FAILED) {
@@ -251,7 +277,7 @@ class LibraryViewModel @Inject constructor(
         } else {
             null
         }
-        filter.copy(
+        extras.filter.copy(
             hasRoot = root != null,
             rootId = root?.id,
             rootPath = root?.displayPath,
@@ -259,12 +285,21 @@ class LibraryViewModel @Inject constructor(
             isScanning = running,
             scanFound = found,
             scanError = scanError,
-            scanResultMessage = scanMsg,
+            scanResultMessage = extras.scanMsg,
+            lastRelativePath = extras.lastPath,
+            pageSize = extras.pageSize,
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = LibraryUiState(),
+    )
+
+    private data class LibraryExtras(
+        val filter: LibraryUiState,
+        val scanMsg: String?,
+        val lastPath: String?,
+        val pageSize: Int,
     )
 
     fun onRootSelected(uri: Uri) {
@@ -351,6 +386,14 @@ class LibraryViewModel @Inject constructor(
         if (ids.isEmpty()) return
         viewModelScope.launch {
             markVideoUseCase.setStatus(ids, status)
+            val root = rootFolderRepository.getCurrent()
+            if (root != null) {
+                val treeUri = Uri.parse(root.treeUri)
+                ids.forEach { id ->
+                    val video = videoRepository.getById(id) ?: return@forEach
+                    browseStateStore.upsertMark(treeUri, video.relativePath, status)
+                }
+            }
             clearSelection()
         }
     }
@@ -400,31 +443,45 @@ class LibraryViewModel @Inject constructor(
     /** 从第一条未标记（若无则全部第一条）进入抖音式过片。 */
     suspend fun startBrowse(): Int? {
         val rootId = rootFolderRepository.getCurrent()?.id ?: return null
+        val pageSize = settingsRepository.pageSize.first()
         val unsorted = videoRepository.queryIds(
             rootId = rootId,
-            filter = FilterSpec(markStatuses = setOf(MarkStatus.UNSORTED)),
+            filter = FilterSpec(markStatuses = setOf(MarkStatus.UNSORTED, MarkStatus.TO_DELETE)),
             sort = filterState.value.sort,
             randomSeed = randomSeed,
+            limit = 1,
+            offset = 0,
         )
-        val all = if (unsorted.isNotEmpty()) {
-            unsorted
-        } else {
-            videoRepository.queryIds(
+        val startId = unsorted.firstOrNull()
+            ?: videoRepository.queryIds(
                 rootId = rootId,
                 filter = FilterSpec(),
                 sort = filterState.value.sort,
                 randomSeed = randomSeed,
-            )
-        }
-        val startId = all.firstOrNull() ?: return null
+                limit = 1,
+                offset = 0,
+            ).firstOrNull()
+            ?: return null
         val result = playlistSession.open(
             rootId = rootId,
             filter = FilterSpec(),
             sort = filterState.value.sort,
             startVideoId = startId,
             randomSeed = randomSeed,
+            pageSize = pageSize,
         )
         return result.startIndex
+    }
+
+    /** 一键跳到目录 txt 记录的上次浏览位置。 */
+    suspend fun resumeLastBrowse(): Int? {
+        val root = rootFolderRepository.getCurrent() ?: return null
+        val last = browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+            ?: lastRelativePath.value
+            ?: return null
+        val videoId = videoRepository.findIdByRelativePath(root.id, last) ?: return null
+        lastRelativePath.value = last
+        return openSwipe(videoId)
     }
 
     /** 选中当前筛选列表全部视频并打开剪切面板。 */
@@ -481,14 +538,23 @@ class LibraryViewModel @Inject constructor(
     suspend fun openSwipe(startVideoId: Long): Int? {
         val rootId = rootFolderRepository.getCurrent()?.id ?: return null
         val ui = filterState.value
+        val pageSize = settingsRepository.pageSize.first()
         val result = playlistSession.open(
             rootId = rootId,
             filter = ui.toFilterSpec(),
             sort = ui.sort,
             startVideoId = startVideoId,
             randomSeed = randomSeed,
+            pageSize = pageSize,
         )
         return result.startIndex
+    }
+
+    fun refreshLastCursor() {
+        viewModelScope.launch {
+            val root = rootFolderRepository.getCurrent() ?: return@launch
+            lastRelativePath.value = browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+        }
     }
 }
 

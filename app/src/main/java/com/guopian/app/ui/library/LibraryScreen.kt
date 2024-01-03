@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Refresh
@@ -59,7 +60,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.guopian.app.R
@@ -68,6 +72,7 @@ import com.guopian.app.core.util.PathAbbreviator
 import com.guopian.app.core.util.StorageAccessHelper
 import com.guopian.app.data.db.VideoEntity
 import com.guopian.app.domain.model.MarkStatus
+import com.guopian.app.domain.model.SortKey
 import com.guopian.app.ui.cut.CutTargetSheet
 import com.guopian.app.ui.theme.GuopianButtonShape
 import com.guopian.app.ui.theme.GuopianCardShape
@@ -140,6 +145,13 @@ fun LibraryScreen(
         val msg = uiState.scanResultMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearScanResultMessage()
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.refreshLastCursor()
+        }
     }
 
     if (uiState.showCutSheet) {
@@ -225,6 +237,17 @@ fun LibraryScreen(
                         onOpenSwipe(start)
                     }
                 },
+                onResumeLast = {
+                    scope.launch {
+                        val start = viewModel.resumeLastBrowse()
+                        if (start == null) {
+                            snackbarHostState.showSnackbar("还没有上次浏览记录")
+                            return@launch
+                        }
+                        onOpenSwipe(start)
+                    }
+                },
+                onSetSort = viewModel::setSort,
                 onCutKept = viewModel::prepareCutKept,
                 onOpenItem = { videoId ->
                     scope.launch {
@@ -401,11 +424,14 @@ private fun LibraryContent(
     onToggleSelect: (Long) -> Unit,
     onEnterSelection: (Long) -> Unit,
     onStartBrowse: () -> Unit,
+    onResumeLast: () -> Unit,
+    onSetSort: (SortKey) -> Unit,
     onCutKept: () -> Unit,
     onOpenItem: (Long) -> Unit,
 ) {
     Column(modifier = modifier) {
         QuickFilterRow(current = uiState.quickFilter, onSelect = onQuickFilter)
+        SortRow(sort = uiState.sort, onSelect = onSetSort)
 
         uiState.externalFilterLabel?.let { label ->
             Row(
@@ -438,7 +464,9 @@ private fun LibraryContent(
 
         if (uiState.videoCount > 0 || videos.itemCount > 0) {
             BrowseActionRow(
+                hasLast = !uiState.lastRelativePath.isNullOrBlank(),
                 onStartBrowse = onStartBrowse,
+                onResumeLast = onResumeLast,
                 onCutKept = onCutKept,
             )
         }
@@ -540,39 +568,104 @@ private fun LibraryContent(
 }
 
 @Composable
-private fun BrowseActionRow(
-    onStartBrowse: () -> Unit,
-    onCutKept: () -> Unit,
+private fun SortRow(
+    sort: com.guopian.app.domain.model.SortSpec,
+    onSelect: (SortKey) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
-        horizontalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap),
+        horizontalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = stringResource(R.string.action_start_browse),
-            modifier = Modifier
-                .weight(1f)
-                .clip(GuopianButtonShape)
-                .background(GuopianColors.Signal)
-                .clickable(onClick = onStartBrowse)
-                .padding(vertical = 12.dp),
+            text = stringResource(R.string.sort_label),
             style = MaterialTheme.typography.labelLarge,
-            color = GuopianColors.OnSignal,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            color = GuopianColors.InkMute,
         )
+        val options = listOf(
+            SortKey.DATE_MODIFIED to R.string.sort_date,
+            SortKey.NAME to R.string.sort_name,
+            SortKey.SIZE to R.string.sort_size,
+            SortKey.DURATION to R.string.sort_duration,
+        )
+        options.forEach { (key, label) ->
+            val selected = sort.key == key
+            val arrow = when {
+                !selected -> ""
+                sort.ascending -> " ↑"
+                else -> " ↓"
+            }
+            Text(
+                text = stringResource(label) + arrow,
+                modifier = Modifier
+                    .clip(GuopianButtonShape)
+                    .background(if (selected) GuopianColors.SignalSoft else Color.Transparent)
+                    .clickable { onSelect(key) }
+                    .padding(horizontal = GuopianDimens.ListGap, vertical = GuopianDimens.Grid),
+                style = MaterialTheme.typography.labelLarge,
+                color = if (selected) GuopianColors.Signal else GuopianColors.InkMute,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrowseActionRow(
+    hasLast: Boolean,
+    onStartBrowse: () -> Unit,
+    onResumeLast: () -> Unit,
+    onCutKept: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
+        verticalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap)) {
+            Text(
+                text = stringResource(R.string.action_start_browse),
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(GuopianButtonShape)
+                    .background(GuopianColors.Signal)
+                    .clickable(onClick = onStartBrowse)
+                    .padding(vertical = 12.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = GuopianColors.OnSignal,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            if (hasLast) {
+                Text(
+                    text = stringResource(R.string.action_resume_last),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(GuopianButtonShape)
+                        .border(GuopianDimens.Hairline, GuopianColors.Signal, GuopianButtonShape)
+                        .clickable(onClick = onResumeLast)
+                        .padding(vertical = 12.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = GuopianColors.Signal,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+        }
         Text(
             text = stringResource(R.string.action_cut_kept),
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .clip(GuopianButtonShape)
-                .border(GuopianDimens.Hairline, GuopianColors.Signal, GuopianButtonShape)
+                .border(GuopianDimens.Hairline, GuopianColors.Rule, GuopianButtonShape)
                 .clickable(onClick = onCutKept)
                 .padding(vertical = 12.dp),
             style = MaterialTheme.typography.labelLarge,
-            color = GuopianColors.Signal,
+            color = GuopianColors.Ink,
             fontWeight = FontWeight.SemiBold,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
@@ -826,8 +919,24 @@ private fun VideoGridItem(
 
 @Composable
 private fun StatusBadge(status: String, modifier: Modifier = Modifier) {
+    if (status == MarkStatus.KEEP.name) {
+        Box(
+            modifier = modifier
+                .size(32.dp)
+                .clip(GuopianButtonShape)
+                .background(Color.Black.copy(alpha = 0.35f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Favorite,
+                contentDescription = stringResource(R.string.mark_keep),
+                tint = Color(0xFFFF2D55),
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        return
+    }
     val (labelRes, bg, fg) = when (status) {
-        MarkStatus.KEEP.name -> Triple(R.string.mark_keep, GuopianColors.Panel, GuopianColors.Slate)
         MarkStatus.PENDING.name -> Triple(R.string.mark_pending, GuopianColors.SignalSoft, GuopianColors.Slate)
         MarkStatus.TO_DELETE.name, MarkStatus.UNSORTED.name ->
             Triple(R.string.mark_to_delete, GuopianColors.Danger, Color.White)

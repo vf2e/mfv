@@ -1,5 +1,10 @@
 package com.guopian.app.ui.swipe
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,18 +37,23 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -59,6 +69,8 @@ import com.guopian.app.R
 import com.guopian.app.core.util.FileSizeFormatter
 import com.guopian.app.core.util.PathAbbreviator
 import com.guopian.app.domain.model.MarkStatus
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -66,6 +78,7 @@ private val PlayerAccent = Color(0xFF3B82F6)
 private val PlayerInk = Color.White
 private val PlayerMute = Color.White.copy(alpha = 0.62f)
 private val ControlFill = Color.Black.copy(alpha = 0.42f)
+private val KeepHeart = Color(0xFFFF2D55)
 
 @Composable
 fun ModernTopBar(
@@ -424,15 +437,97 @@ fun ModernCenterPlay(
     }
 }
 
+/**
+ * 双击/点收藏时的中心心形特效：放大弹入 → 停顿 → 淡出。
+ */
+@Composable
+fun KeepBurstOverlay(
+    epoch: Int,
+    kept: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (epoch <= 0) return
+    key(epoch) {
+        val scale = remember { Animatable(0.35f) }
+        val alpha = remember { Animatable(0f) }
+        LaunchedEffect(epoch) {
+            alpha.snapTo(0f)
+            scale.snapTo(0.35f)
+            launch {
+                alpha.animateTo(1f, tween(90))
+            }
+            scale.animateTo(
+                1.18f,
+                spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            )
+            scale.animateTo(1f, tween(120, easing = FastOutSlowInEasing))
+            delay(520)
+            alpha.animateTo(0f, tween(280, easing = FastOutSlowInEasing))
+        }
+        Column(
+            modifier = modifier
+                .scale(scale.value)
+                .alpha(alpha.value),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.42f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (kept) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = null,
+                    tint = if (kept) KeepHeart else Color.White.copy(alpha = 0.92f),
+                    modifier = Modifier.size(52.dp),
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = stringResource(
+                    if (kept) R.string.keep_burst_on else R.string.keep_burst_off,
+                ),
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.55f),
+                        blurRadius = 8f,
+                    ),
+                ),
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
 @Composable
 fun ModernSideRail(
     modifier: Modifier = Modifier,
     markStatus: MarkStatus,
+    keepBurstEpoch: Int = 0,
     onToggleKeep: () -> Unit,
     onTogglePending: () -> Unit,
 ) {
     val kept = markStatus == MarkStatus.KEEP
     val pending = markStatus == MarkStatus.PENDING
+    val heartScale = remember { Animatable(1f) }
+    LaunchedEffect(keepBurstEpoch) {
+        if (keepBurstEpoch <= 0) return@LaunchedEffect
+        heartScale.snapTo(1f)
+        heartScale.animateTo(
+            1.28f,
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMedium,
+            ),
+        )
+        heartScale.animateTo(1f, tween(140))
+    }
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -441,8 +536,9 @@ fun ModernSideRail(
         SideRailItem(
             icon = if (kept) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
             label = stringResource(R.string.action_like),
-            tint = if (kept) Color(0xFFFF4D6D) else PlayerInk,
+            tint = if (kept) KeepHeart else PlayerInk,
             onClick = onToggleKeep,
+            iconScale = heartScale.value,
         )
         SideRailItem(
             icon = Icons.Outlined.Flag,
@@ -459,8 +555,12 @@ private fun SideRailItem(
     label: String,
     tint: Color,
     onClick: () -> Unit,
+    iconScale: Float = 1f,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.scale(iconScale),
+    ) {
         CircularControl(icon = icon, contentDescription = label, tint = tint, onClick = onClick, size = 46.dp)
         Spacer(modifier = Modifier.height(4.dp))
         Text(

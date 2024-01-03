@@ -28,11 +28,20 @@ object VideoQueryBuilder {
         filter: FilterSpec,
         sort: SortSpec,
         randomSeed: Long = 0L,
+        limit: Int? = null,
+        offset: Int = 0,
     ): SupportSQLiteQuery {
         val (where, args) = buildWhere(rootId, filter)
         val order = buildOrder(sort, randomSeed)
+        val lim = if (limit != null && limit > 0) {
+            args += limit
+            args += offset.coerceAtLeast(0)
+            " LIMIT ? OFFSET ?"
+        } else {
+            ""
+        }
         return SimpleSQLiteQuery(
-            "SELECT id FROM video WHERE $where $order",
+            "SELECT id FROM video WHERE $where $order$lim",
             args.toTypedArray(),
         )
     }

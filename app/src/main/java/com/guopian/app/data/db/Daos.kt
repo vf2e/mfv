@@ -160,6 +160,38 @@ interface VideoDao {
 
     @Query(
         """
+        SELECT relative_path AS relativePath, mark_status AS markStatus, star AS star
+        FROM video
+        WHERE root_id = :rootId
+          AND mark_status IN ('KEEP', 'PENDING')
+        """,
+    )
+    suspend fun listMarkedPaths(rootId: Long): List<MarkedPathRow>
+
+    @Query(
+        """
+        SELECT id FROM video
+        WHERE root_id = :rootId AND is_missing = 0 AND relative_path = :relativePath
+        LIMIT 1
+        """,
+    )
+    suspend fun findIdByRelativePath(rootId: Long, relativePath: String): Long?
+
+    @Query(
+        """
+        UPDATE video SET mark_status = :status, star = :star
+        WHERE root_id = :rootId AND relative_path = :relativePath
+        """,
+    )
+    suspend fun updateMarkByRelativePath(
+        rootId: Long,
+        relativePath: String,
+        status: String,
+        star: Int,
+    )
+
+    @Query(
+        """
         UPDATE video SET
           doc_uri = :docUri,
           document_id = :documentId,

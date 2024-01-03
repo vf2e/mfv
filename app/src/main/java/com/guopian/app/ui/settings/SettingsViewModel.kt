@@ -22,6 +22,7 @@ data class SettingsUiState(
     val videoCount: Int = 0,
     val lastScannedAt: Long = 0L,
     val preloadCount: Int = 1,
+    val pageSize: Int = 100,
     val markAutoNext: Boolean = false,
     val swapSwipe: Boolean = false,
     val showTagsTab: Boolean = false,
@@ -48,10 +49,11 @@ class SettingsViewModel @Inject constructor(
 
     private val playPrefs = combine(
         settingsRepository.preloadCount,
+        settingsRepository.pageSize,
         settingsRepository.endBehavior,
         settingsRepository.playerPrefer,
-    ) { preload, end, player ->
-        Triple(preload, end, player)
+    ) { preload, pageSize, end, player ->
+        PlayPrefs(preload, pageSize, end, player)
     }
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -63,13 +65,14 @@ class SettingsViewModel @Inject constructor(
             rootPath = root?.displayPath,
             videoCount = root?.videoCount ?: 0,
             lastScannedAt = root?.lastScannedAt ?: 0L,
-            preloadCount = play.first,
+            preloadCount = play.preload,
+            pageSize = play.pageSize,
             markAutoNext = gesture.markAutoNext,
             swapSwipe = gesture.swapSwipe,
             showTagsTab = gesture.showTagsTab,
             doubleTapAction = gesture.doubleTap,
-            endBehavior = play.second,
-            playerPrefer = play.third,
+            endBehavior = play.endBehavior,
+            playerPrefer = play.playerPrefer,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -95,6 +98,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setPreloadCount(count: Int) {
         viewModelScope.launch { settingsRepository.setPreloadCount(count) }
+    }
+
+    fun setPageSize(size: Int) {
+        viewModelScope.launch { settingsRepository.setPageSize(size) }
     }
 
     fun setMarkAutoNext(enabled: Boolean) {
@@ -127,4 +134,11 @@ private data class GesturePrefs(
     val swapSwipe: Boolean,
     val doubleTap: DoubleTapAction,
     val showTagsTab: Boolean,
+)
+
+private data class PlayPrefs(
+    val preload: Int,
+    val pageSize: Int,
+    val endBehavior: EndBehavior,
+    val playerPrefer: PlayerPrefer,
 )
