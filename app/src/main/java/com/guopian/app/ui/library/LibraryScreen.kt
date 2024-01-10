@@ -269,6 +269,7 @@ private fun LibraryBrandHeader(
     onScan: () -> Unit,
     onPickRoot: () -> Unit,
 ) {
+    // 单行顶栏：品牌 + 路径同行，右侧紧凑图标，压低标题区高度
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -277,54 +278,80 @@ private fun LibraryBrandHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = GuopianDimens.Page, end = GuopianDimens.Grid, top = GuopianDimens.Page, bottom = GuopianDimens.ListGap),
+                .padding(start = GuopianDimens.Page, end = 4.dp)
+                .height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = GuopianColors.Slate,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(modifier = Modifier.height(GuopianDimens.Grid))
-                Text(
-                    text = rootPath ?: stringResource(R.string.root_path_unset),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = GuopianColors.InkMute,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            IconButton(onClick = onToggleSearch) {
-                Icon(
-                    imageVector = Icons.Outlined.Search,
-                    contentDescription = stringResource(R.string.action_search),
-                    tint = if (showSearch) GuopianColors.Signal else GuopianColors.Ink,
-                )
-            }
+            Text(
+                text = stringResource(R.string.app_name),
+                style = MaterialTheme.typography.headlineMedium,
+                color = GuopianColors.Slate,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+            Text(
+                text = "·",
+                modifier = Modifier.padding(horizontal = 6.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = GuopianColors.Rule,
+            )
+            Text(
+                text = rootPath ?: stringResource(R.string.root_path_unset),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = GuopianColors.InkMute,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            HeaderIconButton(
+                imageVector = Icons.Outlined.Search,
+                contentDescription = stringResource(R.string.action_search),
+                tint = if (showSearch) GuopianColors.Signal else GuopianColors.Ink,
+                onClick = onToggleSearch,
+            )
             if (hasRoot) {
-                IconButton(onClick = onScan) {
-                    Icon(
-                        imageVector = Icons.Outlined.Refresh,
-                        contentDescription = stringResource(R.string.action_scan),
-                        tint = GuopianColors.Ink,
-                    )
-                }
-            }
-            IconButton(onClick = onPickRoot) {
-                Icon(
-                    imageVector = Icons.Outlined.FolderOpen,
-                    contentDescription = stringResource(R.string.action_select_root),
+                HeaderIconButton(
+                    imageVector = Icons.Outlined.Refresh,
+                    contentDescription = stringResource(R.string.action_scan),
                     tint = GuopianColors.Ink,
+                    onClick = onScan,
                 )
             }
+            HeaderIconButton(
+                imageVector = Icons.Outlined.FolderOpen,
+                contentDescription = stringResource(R.string.action_select_root),
+                tint = GuopianColors.Ink,
+                onClick = onPickRoot,
+            )
         }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(GuopianDimens.Hairline)
                 .background(GuopianColors.Rule),
+        )
+    }
+}
+
+@Composable
+private fun HeaderIconButton(
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(GuopianButtonShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(20.dp),
         )
     }
 }
@@ -431,13 +458,12 @@ private fun LibraryContent(
 ) {
     Column(modifier = modifier) {
         QuickFilterRow(current = uiState.quickFilter, onSelect = onQuickFilter)
-        SortRow(sort = uiState.sort, onSelect = onSetSort)
 
         uiState.externalFilterLabel?.let { label ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
+                    .padding(horizontal = GuopianDimens.Page, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
@@ -445,8 +471,8 @@ private fun LibraryContent(
                     modifier = Modifier
                         .clip(GuopianButtonShape)
                         .background(GuopianColors.SignalSoft)
-                        .padding(horizontal = GuopianDimens.ListGap, vertical = GuopianDimens.Grid),
-                    style = MaterialTheme.typography.labelLarge,
+                        .padding(horizontal = GuopianDimens.ListGap, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
                     color = GuopianColors.Signal,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -456,7 +482,7 @@ private fun LibraryContent(
                     modifier = Modifier
                         .clickable(onClick = onClearExternalFilter)
                         .padding(GuopianDimens.Grid),
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelMedium,
                     color = GuopianColors.InkMute,
                 )
             }
@@ -470,6 +496,13 @@ private fun LibraryContent(
                 onCutKept = onCutKept,
             )
         }
+
+        SortAndCountRow(
+            sort = uiState.sort,
+            videoCount = uiState.videoCount,
+            pageSize = uiState.pageSize,
+            onSelect = onSetSort,
+        )
 
         if (showSearch) {
             SearchField(
@@ -487,7 +520,7 @@ private fun LibraryContent(
         if (uiState.isScanning) {
             Text(
                 text = stringResource(R.string.scanning_progress, uiState.scanFound),
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = GuopianDimens.Page, vertical = 4.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = GuopianColors.Signal,
             )
@@ -496,18 +529,11 @@ private fun LibraryContent(
         uiState.scanError?.let { err ->
             Text(
                 text = stringResource(R.string.scan_failed, err),
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                modifier = Modifier.padding(horizontal = GuopianDimens.Page, vertical = 4.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = GuopianColors.Danger,
             )
         }
-
-        Text(
-            text = stringResource(R.string.video_count, uiState.videoCount),
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelLarge,
-            color = GuopianColors.InkMute,
-        )
 
         val showLoading = uiState.isScanning && videos.itemCount == 0
         val showEmpty = !showLoading &&
@@ -568,22 +594,30 @@ private fun LibraryContent(
 }
 
 @Composable
-private fun SortRow(
+private fun SortAndCountRow(
     sort: com.guopian.app.domain.model.SortSpec,
+    videoCount: Int,
+    pageSize: Int,
     onSelect: (SortKey) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
+            .padding(horizontal = GuopianDimens.Page, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = stringResource(R.string.sort_label),
-            style = MaterialTheme.typography.labelLarge,
+            text = stringResource(R.string.video_count_paged, videoCount, pageSize),
+            style = MaterialTheme.typography.labelMedium,
             color = GuopianColors.InkMute,
+            maxLines = 1,
+        )
+        Text(
+            text = "·",
+            style = MaterialTheme.typography.labelMedium,
+            color = GuopianColors.Rule,
         )
         val options = listOf(
             SortKey.DATE_MODIFIED to R.string.sort_date,
@@ -604,8 +638,8 @@ private fun SortRow(
                     .clip(GuopianButtonShape)
                     .background(if (selected) GuopianColors.SignalSoft else Color.Transparent)
                     .clickable { onSelect(key) }
-                    .padding(horizontal = GuopianDimens.ListGap, vertical = GuopianDimens.Grid),
-                style = MaterialTheme.typography.labelLarge,
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
                 color = if (selected) GuopianColors.Signal else GuopianColors.InkMute,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
             )
@@ -620,62 +654,53 @@ private fun BrowseActionRow(
     onResumeLast: () -> Unit,
     onCutKept: () -> Unit,
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
-        verticalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = GuopianDimens.Page, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap)) {
+        Text(
+            text = stringResource(R.string.action_start_browse),
+            modifier = Modifier
+                .clip(GuopianButtonShape)
+                .background(GuopianColors.Signal)
+                .clickable(onClick = onStartBrowse)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = GuopianColors.OnSignal,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+        if (hasLast) {
             Text(
-                text = stringResource(R.string.action_start_browse),
+                text = stringResource(R.string.action_resume_last),
                 modifier = Modifier
-                    .weight(1f)
                     .clip(GuopianButtonShape)
-                    .background(GuopianColors.Signal)
-                    .clickable(onClick = onStartBrowse)
-                    .padding(vertical = 12.dp),
+                    .border(GuopianDimens.Hairline, GuopianColors.Signal, GuopianButtonShape)
+                    .clickable(onClick = onResumeLast)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 style = MaterialTheme.typography.labelLarge,
-                color = GuopianColors.OnSignal,
+                color = GuopianColors.Signal,
                 fontWeight = FontWeight.SemiBold,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 1,
             )
-            if (hasLast) {
-                Text(
-                    text = stringResource(R.string.action_resume_last),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(GuopianButtonShape)
-                        .border(GuopianDimens.Hairline, GuopianColors.Signal, GuopianButtonShape)
-                        .clickable(onClick = onResumeLast)
-                        .padding(vertical = 12.dp),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = GuopianColors.Signal,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                )
-            }
         }
         Text(
-            text = stringResource(R.string.action_cut_kept),
+            text = stringResource(R.string.action_cut_kept_short),
             modifier = Modifier
-                .fillMaxWidth()
                 .clip(GuopianButtonShape)
                 .border(GuopianDimens.Hairline, GuopianColors.Rule, GuopianButtonShape)
                 .clickable(onClick = onCutKept)
-                .padding(vertical = 12.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             style = MaterialTheme.typography.labelLarge,
             color = GuopianColors.Ink,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
         )
     }
-    Text(
-        text = stringResource(R.string.browse_hint),
-        modifier = Modifier.padding(horizontal = GuopianDimens.Page, vertical = 4.dp),
-        style = MaterialTheme.typography.bodySmall,
-        color = GuopianColors.InkMute,
-    )
 }
 
 @Composable
@@ -738,7 +763,7 @@ private fun QuickFilterRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = GuopianDimens.Page, vertical = GuopianDimens.Grid),
+                .padding(horizontal = GuopianDimens.Page, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(GuopianDimens.Grid),
         ) {
             val filters = listOf(
@@ -756,8 +781,8 @@ private fun QuickFilterRow(
                         .clip(GuopianButtonShape)
                         .background(if (selected) GuopianColors.SignalSoft else Color.Transparent)
                         .clickable { onSelect(filter) }
-                        .padding(horizontal = GuopianDimens.ListGap, vertical = GuopianDimens.Grid),
-                    style = MaterialTheme.typography.labelLarge,
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
                     color = if (selected) GuopianColors.Signal else GuopianColors.InkMute,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 )
