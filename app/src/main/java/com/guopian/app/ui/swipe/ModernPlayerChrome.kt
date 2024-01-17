@@ -454,18 +454,18 @@ fun KeepBurstOverlay(
             alpha.snapTo(0f)
             scale.snapTo(0.35f)
             launch {
-                alpha.animateTo(1f, tween(90))
+                alpha.animateTo(1f, tween(60))
             }
             scale.animateTo(
-                1.18f,
+                1.12f,
                 spring(
                     dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
+                    stiffness = Spring.StiffnessMedium,
                 ),
             )
-            scale.animateTo(1f, tween(120, easing = FastOutSlowInEasing))
-            delay(520)
-            alpha.animateTo(0f, tween(280, easing = FastOutSlowInEasing))
+            scale.animateTo(1f, tween(80, easing = FastOutSlowInEasing))
+            delay(160)
+            alpha.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
         }
         Column(
             modifier = modifier
