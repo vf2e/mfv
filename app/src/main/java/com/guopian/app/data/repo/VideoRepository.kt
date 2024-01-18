@@ -65,6 +65,28 @@ class VideoRepository @Inject constructor(
         )
     }
 
+    suspend fun queryPage(
+        rootId: Long,
+        filter: FilterSpec,
+        sort: SortSpec,
+        randomSeed: Long,
+        pageSize: Int,
+        pageIndex: Int,
+    ): List<VideoEntity> {
+        val size = pageSize.coerceIn(20, 500)
+        val index = pageIndex.coerceAtLeast(0)
+        return videoDao.queryVideos(
+            VideoQueryBuilder.buildPageQuery(
+                rootId = rootId,
+                filter = filter,
+                sort = sort,
+                randomSeed = randomSeed,
+                limit = size,
+                offset = index * size,
+            ),
+        )
+    }
+
     suspend fun countFiltered(rootId: Long, filter: FilterSpec): Int {
         return videoDao.countByQuery(VideoQueryBuilder.buildCountQuery(rootId, filter))
     }

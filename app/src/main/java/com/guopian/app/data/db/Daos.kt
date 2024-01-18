@@ -53,6 +53,9 @@ interface VideoDao {
     suspend fun queryIds(query: SupportSQLiteQuery): List<Long>
 
     @RawQuery(observedEntities = [VideoEntity::class])
+    suspend fun queryVideos(query: SupportSQLiteQuery): List<VideoEntity>
+
+    @RawQuery(observedEntities = [VideoEntity::class])
     suspend fun countByQuery(query: SupportSQLiteQuery): Int
 
     @Query(

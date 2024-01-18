@@ -23,6 +23,24 @@ object VideoQueryBuilder {
         )
     }
 
+    fun buildPageQuery(
+        rootId: Long,
+        filter: FilterSpec,
+        sort: SortSpec,
+        randomSeed: Long = 0L,
+        limit: Int,
+        offset: Int,
+    ): SupportSQLiteQuery {
+        val (where, args) = buildWhere(rootId, filter)
+        val order = buildOrder(sort, randomSeed)
+        args += limit.coerceAtLeast(1)
+        args += offset.coerceAtLeast(0)
+        return SimpleSQLiteQuery(
+            "SELECT * FROM video WHERE $where $order LIMIT ? OFFSET ?",
+            args.toTypedArray(),
+        )
+    }
+
     fun buildIdsQuery(
         rootId: Long,
         filter: FilterSpec,
