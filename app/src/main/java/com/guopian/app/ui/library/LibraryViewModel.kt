@@ -4,10 +4,9 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.paging.PagingData
-import androidx.paging.cachedIn
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.guopian.app.data.db.RootFolderEntity
 import com.guopian.app.data.db.VideoEntity
 import com.guopian.app.data.prefs.SettingsRepository
 import com.guopian.app.data.repo.RootBrowseStateStore
@@ -27,19 +26,20 @@ import com.guopian.app.work.ScanScheduler
 import com.guopian.app.work.ScanWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 import javax.inject.Inject
 
@@ -53,6 +53,8 @@ enum class QuickFilter {
 }
 
 data class LibraryUiState(
+    /** false：根目录尚未从 DB 读出，避免闪「未选择文件夹」空态 */
+    val rootResolved: Boolean = false,
     val hasRoot: Boolean = false,
     val rootId: Long? = null,
     val rootPath: String? = null,
@@ -77,6 +79,9 @@ data class LibraryUiState(
     val scanResultMessage: String? = null,
     val lastRelativePath: String? = null,
     val pageSize: Int = 100,
+    val pageIndex: Int = 0,
+    val pageCount: Int = 0,
+    val pageLoading: Boolean = true,
 )
 
 @HiltViewModel
@@ -96,72 +101,88 @@ class LibraryViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val rootFlow = rootFolderRepository.observeCurrent()
+    private val rootState = MutableStateFlow<RootFolderEntity?>(null)
+    private val rootResolved = MutableStateFlow(false)
     private val filterState = MutableStateFlow(LibraryUiState())
 
     val folderPresets: StateFlow<List<FolderPresetEntity>> = folderPresetDao.observeRecent()
         .stateIn(
             scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
+            started = SharingStarted.Eagerly,
             initialValue = emptyList(),
         )
 
     val tags: StateFlow<List<com.guopian.app.data.db.TagEntity>> = tagDao.observeAll()
         .stateIn(
             scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
+            started = SharingStarted.Eagerly,
             initialValue = emptyList(),
         )
 
-    private val scanInfoFlow = WorkManager.getInstance(context)
+    private val scanInfoState: StateFlow<WorkInfo?> = WorkManager.getInstance(context)
         .getWorkInfosForUniqueWorkFlow(ScanWorker.UNIQUE_WORK)
         .map { infos -> infos.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val randomSeed = System.currentTimeMillis()
     private val lastRelativePath = MutableStateFlow<String?>(null)
     private val pageSizeFlow = settingsRepository.pageSize
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 100)
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val videos: Flow<PagingData<VideoEntity>> = combine(
-        rootFlow,
-        filterState,
-        pageSizeFlow,
-    ) { root, ui, pageSize ->
-        Triple(root, ui, pageSize)
-    }.flatMapLatest { (root, ui, pageSize) ->
-        if (root == null) {
-            flowOf(PagingData.empty())
-        } else {
-            videoRepository.pagingVideos(
-                rootId = root.id,
-                filter = ui.toFilterSpec(),
-                sort = ui.sort,
-                randomSeed = randomSeed,
-                pageSize = pageSize,
-            )
-        }
-    }.cachedIn(viewModelScope)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 100)
+    private val pageIndex = MutableStateFlow(0)
+    private val pageReload = MutableStateFlow(0)
+    private val pageLoading = MutableStateFlow(true)
 
     private val filteredCount = MutableStateFlow(0)
     private val scanResultMessage = MutableStateFlow<String?>(null)
     private var lastHandledScanId: UUID? = null
 
+    private val _pageVideos = MutableStateFlow<List<VideoEntity>>(emptyList())
+    val pageVideos: StateFlow<List<VideoEntity>> = _pageVideos.asStateFlow()
+
     init {
         viewModelScope.launch {
+            bootstrapLibrary()
+            observePageQueries()
+        }
+        viewModelScope.launch {
             rootFlow.collect { root ->
+                // bootstrap 已写入 rootState；仅在变化时同步，避免无值回写造成闪烁
+                if (root?.id != rootState.value?.id || root?.treeUri != rootState.value?.treeUri) {
+                    rootState.value = root
+                }
                 if (root == null) {
                     lastRelativePath.value = null
-                } else {
-                    lastRelativePath.value = browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+                } else if (lastRelativePath.value == null) {
+                    lastRelativePath.value = withContext(Dispatchers.IO) {
+                        browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+                    }
                 }
             }
         }
         viewModelScope.launch {
-            combine(rootFlow, filterState) { root, ui -> root to ui }.collect { (root, ui) ->
+            rootResolved.first { it }
+            combine(rootState, filterState) { root, ui -> root to ui }.collect { (root, ui) ->
                 if (root == null) {
                     filteredCount.value = 0
                 } else {
-                    filteredCount.value = videoRepository.countFiltered(root.id, ui.toFilterSpec())
+                    filteredCount.value = withContext(Dispatchers.IO) {
+                        videoRepository.countFiltered(root.id, ui.toFilterSpec())
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(filterState, pageSizeFlow) { _, _ -> }.collect {
+                if (pageIndex.value != 0) pageIndex.value = 0
+            }
+        }
+        viewModelScope.launch {
+            combine(filteredCount, pageSizeFlow, pageIndex) { count, size, index ->
+                Triple(count, size, index)
+            }.collect { (count, size, index) ->
+                val pages = if (count <= 0 || size <= 0) 0 else (count + size - 1) / size
+                if (pages > 0 && index >= pages) {
+                    pageIndex.value = pages - 1
                 }
             }
         }
@@ -174,7 +195,16 @@ class LibraryViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            scanInfoFlow.collect { work ->
+            var ignoreHistorical = true
+            scanInfoState.collect { work ->
+                if (ignoreHistorical) {
+                    // 冷启动忽略上次已结束的扫描结果，避免每次打开都弹「扫描完成」
+                    ignoreHistorical = false
+                    lastHandledScanId = work?.takeIf {
+                        it.state == WorkInfo.State.SUCCEEDED || it.state == WorkInfo.State.FAILED
+                    }?.id
+                    return@collect
+                }
                 if (work == null) return@collect
                 if (work.state == WorkInfo.State.SUCCEEDED && work.id != lastHandledScanId) {
                     lastHandledScanId = work.id
@@ -185,7 +215,6 @@ class LibraryViewModel @Inject constructor(
                     } else {
                         "扫描完成：在「$folder」发现 $n 部视频"
                     }
-                    // refresh filtered count after DB write
                     val root = rootFolderRepository.getCurrent()
                     if (root != null) {
                         filteredCount.value = videoRepository.countFiltered(
@@ -193,6 +222,7 @@ class LibraryViewModel @Inject constructor(
                             filterState.value.toFilterSpec(),
                         )
                     }
+                    bumpPageReload()
                 } else if (work.state == WorkInfo.State.FAILED && work.id != lastHandledScanId) {
                     lastHandledScanId = work.id
                     scanResultMessage.value = work.outputData.getString(ScanWorker.KEY_ERROR)
@@ -202,7 +232,82 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    /** 先进库：同步读根目录 + 第一页，避免闪空态。 */
+    private suspend fun bootstrapLibrary() {
+        pageLoading.value = true
+        val (root, pageSize) = withContext(Dispatchers.IO) {
+            rootFolderRepository.getCurrent() to settingsRepository.pageSize.first()
+        }
+        rootState.value = root
+        if (root == null) {
+            _pageVideos.value = emptyList()
+            filteredCount.value = 0
+            pageLoading.value = false
+            rootResolved.value = true
+            return
+        }
+        val ui = filterState.value
+        val (count, page) = withContext(Dispatchers.IO) {
+            val filter = ui.toFilterSpec()
+            val c = videoRepository.countFiltered(root.id, filter)
+            val p = videoRepository.queryPage(
+                rootId = root.id,
+                filter = filter,
+                sort = ui.sort,
+                randomSeed = randomSeed,
+                pageSize = pageSize,
+                pageIndex = 0,
+            )
+            c to p
+        }
+        filteredCount.value = count
+        _pageVideos.value = page
+        lastRelativePath.value = withContext(Dispatchers.IO) {
+            browseStateStore.read(Uri.parse(root.treeUri)).lastRelativePath
+        }
+        pageLoading.value = false
+        rootResolved.value = true
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun observePageQueries() {
+        combine(
+            rootState,
+            filterState,
+            pageSizeFlow,
+            pageIndex,
+            pageReload,
+        ) { root, ui, pageSize, index, _ ->
+            PageQuery(root?.id, ui, pageSize, index)
+        }.mapLatest { query ->
+            val rootId = query.rootId
+            if (rootId == null) {
+                pageLoading.value = false
+                emptyList()
+            } else {
+                pageLoading.value = true
+                try {
+                    withContext(Dispatchers.IO) {
+                        videoRepository.queryPage(
+                            rootId = rootId,
+                            filter = query.ui.toFilterSpec(),
+                            sort = query.ui.sort,
+                            randomSeed = randomSeed,
+                            pageSize = query.pageSize,
+                            pageIndex = query.pageIndex,
+                        )
+                    }
+                } finally {
+                    pageLoading.value = false
+                }
+            }
+        }.collect { list ->
+            _pageVideos.value = list
+        }
+    }
+
     private fun applyBrowseRequest(request: LibraryBrowseRequest) {
+        pageIndex.value = 0
         filterState.update {
             when (request) {
                 is LibraryBrowseRequest.ByMarks -> it.copy(
@@ -250,6 +355,7 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun clearExternalFilter() {
+        pageIndex.value = 0
         filterState.update {
             it.copy(
                 filterExtensions = emptySet(),
@@ -261,38 +367,75 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    fun nextPage() {
+        val count = filteredCount.value
+        val size = pageSizeFlow.value
+        val pages = if (count <= 0 || size <= 0) 0 else (count + size - 1) / size
+        if (pageIndex.value + 1 < pages) {
+            pageIndex.value = pageIndex.value + 1
+        }
+    }
+
+    fun previousPage() {
+        if (pageIndex.value > 0) {
+            pageIndex.value = pageIndex.value - 1
+        }
+    }
+
+    private fun bumpPageReload() {
+        pageReload.update { it + 1 }
+    }
+
     val uiState: StateFlow<LibraryUiState> = combine(
-        combine(rootFlow, filteredCount, scanInfoFlow) { root, count, work ->
-            Triple(root, count, work)
+        combine(rootState, filteredCount, scanInfoState, rootResolved) { root, count, work, resolved ->
+            RootCountWork(root, count, work, resolved)
         },
         combine(filterState, scanResultMessage, lastRelativePath, pageSizeFlow) { filter, scanMsg, last, pageSize ->
             LibraryExtras(filter, scanMsg, last, pageSize)
         },
-    ) { rootCountWork, extras ->
-        val (root, count, work) = rootCountWork
-        val running = work?.state == WorkInfo.State.RUNNING || work?.state == WorkInfo.State.ENQUEUED
-        val found = work?.progress?.getInt(ScanWorker.KEY_FOUND, 0) ?: 0
-        val scanError = if (work?.state == WorkInfo.State.FAILED) {
-            work.outputData.getString(ScanWorker.KEY_ERROR) ?: "扫描失败"
+        combine(pageIndex, pageLoading) { index, loading -> index to loading },
+    ) { rootCountWork, extras, pageMeta ->
+        val (index, loading) = pageMeta
+        val running = rootCountWork.work?.state == WorkInfo.State.RUNNING ||
+            rootCountWork.work?.state == WorkInfo.State.ENQUEUED
+        val found = rootCountWork.work?.progress?.getInt(ScanWorker.KEY_FOUND, 0) ?: 0
+        val scanError = if (rootCountWork.work?.state == WorkInfo.State.FAILED) {
+            rootCountWork.work.outputData.getString(ScanWorker.KEY_ERROR) ?: "扫描失败"
         } else {
             null
         }
+        val pages = if (rootCountWork.count <= 0 || extras.pageSize <= 0) {
+            0
+        } else {
+            (rootCountWork.count + extras.pageSize - 1) / extras.pageSize
+        }
         extras.filter.copy(
-            hasRoot = root != null,
-            rootId = root?.id,
-            rootPath = root?.displayPath,
-            videoCount = count,
+            rootResolved = rootCountWork.resolved,
+            hasRoot = rootCountWork.root != null,
+            rootId = rootCountWork.root?.id,
+            rootPath = rootCountWork.root?.displayPath,
+            videoCount = rootCountWork.count,
             isScanning = running,
             scanFound = found,
             scanError = scanError,
             scanResultMessage = extras.scanMsg,
             lastRelativePath = extras.lastPath,
             pageSize = extras.pageSize,
+            pageIndex = index.coerceAtLeast(0),
+            pageCount = pages,
+            pageLoading = loading,
         )
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5_000),
+        started = SharingStarted.Eagerly,
         initialValue = LibraryUiState(),
+    )
+
+    private data class RootCountWork(
+        val root: RootFolderEntity?,
+        val count: Int,
+        val work: WorkInfo?,
+        val resolved: Boolean,
     )
 
     private data class LibraryExtras(
@@ -300,6 +443,13 @@ class LibraryViewModel @Inject constructor(
         val scanMsg: String?,
         val lastPath: String?,
         val pageSize: Int,
+    )
+
+    private data class PageQuery(
+        val rootId: Long?,
+        val ui: LibraryUiState,
+        val pageSize: Int,
+        val pageIndex: Int,
     )
 
     fun onRootSelected(uri: Uri) {
@@ -321,6 +471,7 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun setQuickFilter(filter: QuickFilter) {
+        pageIndex.value = 0
         filterState.update {
             it.copy(
                 quickFilter = filter,
@@ -345,14 +496,17 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun setPathKeyword(keyword: String) {
+        pageIndex.value = 0
         filterState.update { it.copy(pathKeyword = keyword) }
     }
 
     fun setQueryText(text: String) {
+        pageIndex.value = 0
         filterState.update { it.copy(queryText = text) }
     }
 
     fun setSort(key: SortKey) {
+        pageIndex.value = 0
         filterState.update {
             val asc = if (it.sort.key == key) !it.sort.ascending else false
             it.copy(sort = SortSpec(key, asc))
@@ -393,8 +547,13 @@ class LibraryViewModel @Inject constructor(
                     val video = videoRepository.getById(id) ?: return@forEach
                     browseStateStore.upsertMark(treeUri, video.relativePath, status)
                 }
+                filteredCount.value = videoRepository.countFiltered(
+                    root.id,
+                    filterState.value.toFilterSpec(),
+                )
             }
             clearSelection()
+            bumpPageReload()
         }
     }
 

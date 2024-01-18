@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -57,6 +58,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -64,8 +66,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.paging.LoadState
-import androidx.paging.compose.collectAsLazyPagingItems
 import com.guopian.app.R
 import com.guopian.app.core.util.FileSizeFormatter
 import com.guopian.app.core.util.PathAbbreviator
@@ -91,7 +91,7 @@ fun LibraryScreen(
     viewModel: LibraryViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val videos = viewModel.videos.collectAsLazyPagingItems()
+    val videos by viewModel.pageVideos.collectAsStateWithLifecycle()
     val presets by viewModel.folderPresets.collectAsStateWithLifecycle()
     val tags by viewModel.tags.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -203,7 +203,20 @@ fun LibraryScreen(
                 },
             )
         }
-        if (!uiState.hasRoot) {
+        if (!uiState.rootResolved) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    color = GuopianColors.Signal,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+        } else if (!uiState.hasRoot) {
             EmptyRootState(
                 modifier = Modifier
                     .fillMaxSize()
@@ -249,6 +262,8 @@ fun LibraryScreen(
                 },
                 onSetSort = viewModel::setSort,
                 onCutKept = viewModel::prepareCutKept,
+                onPrevPage = viewModel::previousPage,
+                onNextPage = viewModel::nextPage,
                 onOpenItem = { videoId ->
                     scope.launch {
                         val start = viewModel.openSwipe(videoId) ?: return@launch
@@ -441,7 +456,7 @@ private fun SelectionBar(
 private fun LibraryContent(
     modifier: Modifier,
     uiState: LibraryUiState,
-    videos: androidx.paging.compose.LazyPagingItems<VideoEntity>,
+    videos: List<VideoEntity>,
     showSearch: Boolean,
     onQuickFilter: (QuickFilter) -> Unit,
     onClearExternalFilter: () -> Unit,
@@ -454,6 +469,8 @@ private fun LibraryContent(
     onResumeLast: () -> Unit,
     onSetSort: (SortKey) -> Unit,
     onCutKept: () -> Unit,
+    onPrevPage: () -> Unit,
+    onNextPage: () -> Unit,
     onOpenItem: (Long) -> Unit,
 ) {
     Column(modifier = modifier) {
@@ -488,7 +505,7 @@ private fun LibraryContent(
             }
         }
 
-        if (uiState.videoCount > 0 || videos.itemCount > 0) {
+        if (uiState.videoCount > 0 || videos.isNotEmpty()) {
             BrowseActionRow(
                 hasLast = !uiState.lastRelativePath.isNullOrBlank(),
                 onStartBrowse = onStartBrowse,
@@ -500,6 +517,8 @@ private fun LibraryContent(
         SortAndCountRow(
             sort = uiState.sort,
             videoCount = uiState.videoCount,
+            pageIndex = uiState.pageIndex,
+            pageCount = uiState.pageCount,
             pageSize = uiState.pageSize,
             onSelect = onSetSort,
         )
@@ -535,10 +554,13 @@ private fun LibraryContent(
             )
         }
 
-        val showLoading = uiState.isScanning && videos.itemCount == 0
-        val showEmpty = !showLoading &&
-            videos.itemCount == 0 &&
-            videos.loadState.refresh is LoadState.NotLoading
+        val showLoading = (uiState.isScanning || uiState.pageLoading || !uiState.rootResolved) &&
+            videos.isEmpty()
+        val showEmpty = uiState.rootResolved &&
+            !uiState.pageLoading &&
+            !uiState.isScanning &&
+            videos.isEmpty() &&
+            uiState.videoCount == 0
 
         when {
             showLoading -> {
@@ -556,22 +578,21 @@ private fun LibraryContent(
                 )
             }
             else -> {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(148.dp),
-                    contentPadding = PaddingValues(
-                        horizontal = GuopianDimens.Page,
-                        vertical = GuopianDimens.Grid,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap),
-                    horizontalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    items(
-                        count = videos.itemCount,
-                        key = { index -> videos.peek(index)?.id ?: index },
-                    ) { index ->
-                        val item = videos[index]
-                        if (item != null) {
+                Column(modifier = Modifier.weight(1f)) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(148.dp),
+                        contentPadding = PaddingValues(
+                            horizontal = GuopianDimens.Page,
+                            vertical = GuopianDimens.Grid,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap),
+                        horizontalArrangement = Arrangement.spacedBy(GuopianDimens.ListGap),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        items(
+                            items = videos,
+                            key = { it.id },
+                        ) { item ->
                             VideoGridItem(
                                 video = item,
                                 selected = item.id in uiState.selectedIds,
@@ -587,8 +608,74 @@ private fun LibraryContent(
                             )
                         }
                     }
+                    if (uiState.pageCount > 1) {
+                        LibraryPageBar(
+                            pageIndex = uiState.pageIndex,
+                            pageCount = uiState.pageCount,
+                            onPrev = onPrevPage,
+                            onNext = onNextPage,
+                        )
+                    }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LibraryPageBar(
+    pageIndex: Int,
+    pageCount: Int,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val canPrev = pageIndex > 0
+    val canNext = pageIndex + 1 < pageCount
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(GuopianDimens.Hairline)
+                .background(GuopianColors.Rule),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(GuopianColors.Panel)
+                .padding(horizontal = GuopianDimens.Page, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.library_page_prev),
+                modifier = Modifier
+                    .clip(GuopianButtonShape)
+                    .clickable(enabled = canPrev, onClick = onPrev)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = if (canPrev) GuopianColors.Signal else GuopianColors.InkMute.copy(alpha = 0.45f),
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = stringResource(
+                    R.string.library_page_indicator,
+                    pageIndex + 1,
+                    pageCount,
+                ),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = GuopianColors.InkMute,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = stringResource(R.string.library_page_next),
+                modifier = Modifier
+                    .clip(GuopianButtonShape)
+                    .clickable(enabled = canNext, onClick = onNext)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = if (canNext) GuopianColors.Signal else GuopianColors.InkMute.copy(alpha = 0.45f),
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
 }
@@ -597,9 +684,13 @@ private fun LibraryContent(
 private fun SortAndCountRow(
     sort: com.guopian.app.domain.model.SortSpec,
     videoCount: Int,
+    pageIndex: Int,
+    pageCount: Int,
     pageSize: Int,
     onSelect: (SortKey) -> Unit,
 ) {
+    val displayPage = if (pageCount <= 0) 0 else pageIndex + 1
+    val displayCount = pageCount.coerceAtLeast(if (videoCount > 0) 1 else 0)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -609,7 +700,13 @@ private fun SortAndCountRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = stringResource(R.string.video_count_paged, videoCount, pageSize),
+            text = stringResource(
+                R.string.video_count_paged,
+                videoCount,
+                displayPage,
+                displayCount,
+                pageSize,
+            ),
             style = MaterialTheme.typography.labelMedium,
             color = GuopianColors.InkMute,
             maxLines = 1,

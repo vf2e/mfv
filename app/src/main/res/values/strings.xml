@@ -67,7 +67,10 @@
     <string name="root_path_unset">未选择总文件夹</string>
     <string name="scanning_progress">正在扫描… 已发现 %1$d 部</string>
     <string name="video_count">共 %1$d 部视频</string>
-    <string name="video_count_paged">共 %1$d 部 · 过片每页 %2$d</string>
+    <string name="video_count_paged">共 %1$d 部 · 第 %2$d/%3$d 页 · 每页 %4$d</string>
+    <string name="library_page_prev">上一页</string>
+    <string name="library_page_next">下一页</string>
+    <string name="library_page_indicator">第 %1$d / %2$d 页</string>
     <string name="selected_count">已选 %1$d</string>
     <string name="filter_all">全部</string>
     <string name="filter_path_keyword">路径包含</string>
@@ -94,7 +97,7 @@
     <string name="swipe_page_indicator">第 %1$d/%2$d 页 · 本页 %3$d · 共 %4$d</string>
     <string name="action_cut_filtered">剪切本列表</string>
     <string name="browse_hint">点「开始过片」或视频进入；上下滑浏览，右侧标记再点可取消。点屏幕播放/暂停，底栏拖进度，右上可横竖屏。</string>
-    <string name="action_cut_kept_short">剪收藏</string>
+    <string name="action_cut_kept_short">剪切已收藏视频</string>
     <string name="swipe_loading">正在打开滑动浏览…</string>
     <string name="action_play">播放</string>
     <string name="action_pause">暂停</string>
