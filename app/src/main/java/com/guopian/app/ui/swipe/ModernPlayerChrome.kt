@@ -2,8 +2,6 @@ package com.guopian.app.ui.swipe
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -438,7 +436,7 @@ fun ModernCenterPlay(
 }
 
 /**
- * 双击/点收藏时的中心心形特效：放大弹入 → 停顿 → 淡出。
+ * 双击/点收藏时的中心心形特效：约 200ms 总时长（快入 → 短停 → 快出）。
  */
 @Composable
 fun KeepBurstOverlay(
@@ -448,24 +446,17 @@ fun KeepBurstOverlay(
 ) {
     if (epoch <= 0) return
     key(epoch) {
-        val scale = remember { Animatable(0.35f) }
+        val scale = remember { Animatable(0.75f) }
         val alpha = remember { Animatable(0f) }
         LaunchedEffect(epoch) {
             alpha.snapTo(0f)
-            scale.snapTo(0.35f)
+            scale.snapTo(0.75f)
             launch {
-                alpha.animateTo(1f, tween(60))
+                alpha.animateTo(1f, tween(30))
             }
-            scale.animateTo(
-                1.12f,
-                spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium,
-                ),
-            )
-            scale.animateTo(1f, tween(80, easing = FastOutSlowInEasing))
-            delay(160)
-            alpha.animateTo(0f, tween(140, easing = FastOutSlowInEasing))
+            scale.animateTo(1f, tween(50, easing = FastOutSlowInEasing))
+            delay(100)
+            alpha.animateTo(0f, tween(50, easing = FastOutSlowInEasing))
         }
         Column(
             modifier = modifier
@@ -475,7 +466,7 @@ fun KeepBurstOverlay(
         ) {
             Box(
                 modifier = Modifier
-                    .size(96.dp)
+                    .size(72.dp)
                     .clip(CircleShape)
                     .background(Color.Black.copy(alpha = 0.42f)),
                 contentAlignment = Alignment.Center,
@@ -484,19 +475,19 @@ fun KeepBurstOverlay(
                     imageVector = if (kept) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                     contentDescription = null,
                     tint = if (kept) KeepHeart else Color.White.copy(alpha = 0.92f),
-                    modifier = Modifier.size(52.dp),
+                    modifier = Modifier.size(40.dp),
                 )
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = stringResource(
                     if (kept) R.string.keep_burst_on else R.string.keep_burst_off,
                 ),
                 color = Color.White,
-                style = MaterialTheme.typography.titleMedium.copy(
+                style = MaterialTheme.typography.labelLarge.copy(
                     shadow = Shadow(
                         color = Color.Black.copy(alpha = 0.55f),
-                        blurRadius = 8f,
+                        blurRadius = 6f,
                     ),
                 ),
                 fontWeight = FontWeight.SemiBold,
@@ -519,14 +510,8 @@ fun ModernSideRail(
     LaunchedEffect(keepBurstEpoch) {
         if (keepBurstEpoch <= 0) return@LaunchedEffect
         heartScale.snapTo(1f)
-        heartScale.animateTo(
-            1.28f,
-            spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium,
-            ),
-        )
-        heartScale.animateTo(1f, tween(140))
+        heartScale.animateTo(1.18f, tween(50, easing = FastOutSlowInEasing))
+        heartScale.animateTo(1f, tween(80, easing = FastOutSlowInEasing))
     }
     Column(
         modifier = modifier,
